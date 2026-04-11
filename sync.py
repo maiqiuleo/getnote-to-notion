@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Get 笔记 → Notion 碎片中心 自动同步
+Get 笔记 → Notion get 笔记数据库 自动同步
 
 功能：
 - 拉取 Get 笔记中指定时间范围内的所有笔记
-- 同步到 Notion 碎片中心数据库
+- 同步到 Notion get 笔记数据库
 - 避免重复同步（基于 Get 笔记 ID 记录）
 - 支持录音转文字内容的同步
 - 保留标签、来源链接等元数据
@@ -29,7 +29,7 @@ GETNOTE_CLIENT_ID = os.environ.get("GETNOTE_CLIENT_ID", "cli_3802f9db08b811f1976
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 NOTION_VERSION = "2022-06-28"
-NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")  # 碎片中心数据库 ID
+NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")  # get 笔记数据库 ID
 
 # 处理记录文件
 PROCESSED_IDS_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
@@ -231,7 +231,7 @@ def parse_note_content(note_detail):
 
 def create_notion_page(note, note_detail):
     """
-    在 Notion 碎片中心创建页面
+    在 Notion get 笔记数据库创建页面
     """
     title = note.get("title", "")
     note_id = str(note.get("id", ""))
@@ -251,28 +251,34 @@ def create_notion_page(note, note_detail):
     if "tags" in note and note["tags"]:
         tags = [t.get("name", "") for t in note["tags"] if t.get("name")]
     
-    # 构建页面属性
+    # 构建页面属性（匹配 get 笔记数据库结构）
     properties = {
-        "Name": {
+        "标题": {
             "title": [{"text": {"content": title[:100]}}]
         },
-        "创建时间": {
-            "created_time": created_at if created_at else datetime.now(timezone.utc).isoformat()
+        "笔记 ID": {
+            "rich_text": [{"text": {"content": note_id}}]
         },
-        "删除": {
-            "checkbox": False
+        "笔记类型": {
+            "select": {"name": "plain_text"}
         }
     }
     
-    # 添加标签（如果有 Tags 字段）
-    if tags:
-        properties["Tags"] = {
-            "multi_select": [{"name": t} for t in tags[:10]]  # 最多 10 个标签
-        }
+    # 添加创建时间（如果有）
+    if created_at:
+        # 将 ISO 格式转换为日期
+        try:
+            dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            date_str = dt.strftime("%Y-%m-%d")
+            properties["创建时间"] = {"date": {"start": date_str}}
+        except:
+            pass
     
-    # 添加来源链接
-    note_url = f"https://biji.com/note/{note_id}"
-    properties["Link"] = {"url": note_url}
+    # 添加标签（如果有）
+    if tags:
+        properties["标签"] = {
+            "multi_select": [{"name": t} for t in tags[:10]]
+        }
     
     # 构建页面内容（正文）
     children = []
