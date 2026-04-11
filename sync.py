@@ -133,7 +133,7 @@ def fetch_getnote_notes():
             print(f"[ERROR] 获取笔记列表失败: {error_msg}")
             break
         
-        notes = result.get("data", {}).get("list", [])
+        notes = result.get("data", {}).get("notes", [])
         if not notes:
             break
         
