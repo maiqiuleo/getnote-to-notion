@@ -69,9 +69,11 @@ def getnote_request(path, method="GET", body=None):
     data = json.dumps(body).encode() if body else None
     
     req = Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {GETNOTE_API_KEY}")
-    req.add_header("x-client-id", GETNOTE_CLIENT_ID)
-    req.add_header("Content-Type", "application/json")
+    # Get笔记 API 认证：Authorization 直接传 API Key，不需要 Bearer
+    req.add_header("Authorization", GETNOTE_API_KEY)
+    req.add_header("X-Client-ID", GETNOTE_CLIENT_ID)
+    if body:
+        req.add_header("Content-Type", "application/json")
     
     ctx = ssl.create_default_context()
     try:
@@ -112,18 +114,18 @@ def notion_request(path, body=None, method="POST"):
 def fetch_getnote_notes():
     """
     从 Get 笔记拉取笔记列表
-    使用分页获取所有笔记
+    使用 since_id 分页获取所有笔记
     """
     all_notes = []
-    page = 1
-    page_size = 50
-    max_pages = 10  # 最多获取 500 条笔记
+    since_id = 0
+    max_iterations = 20  # 最多获取 20 页
+    iteration = 0
     
-    while page <= max_pages:
-        print(f"[INFO] 正在获取 Get 笔记第 {page} 页...")
+    while iteration < max_iterations:
+        print(f"[INFO] 正在获取 Get 笔记 (since_id={since_id})...")
         
         result = getnote_request(
-            f"/open/api/v1/resource/notes?page={page}&page_size={page_size}"
+            f"/open/api/v1/resource/note/list?since_id={since_id}"
         )
         
         if not result or not result.get("success"):
@@ -137,12 +139,20 @@ def fetch_getnote_notes():
         
         all_notes.extend(notes)
         
-        # 检查是否还有下一页
-        total = result.get("data", {}).get("total", 0)
-        if page * page_size >= total:
+        # 获取最后一条笔记的 ID 作为下一页的 since_id
+        last_note = notes[-1]
+        next_since_id = last_note.get("id", 0)
+        
+        # 如果 since_id 没有变化，说明已经获取完所有笔记
+        if next_since_id == since_id:
             break
         
-        page += 1
+        since_id = next_since_id
+        iteration += 1
+        
+        # 如果获取的笔记数量少于预期，可能是最后一页
+        if len(notes) < 20:  # 假设每页默认 20 条
+            break
     
     print(f"[INFO] 共获取 {len(all_notes)} 条笔记")
     return all_notes
@@ -152,7 +162,7 @@ def fetch_note_detail(note_id):
     """
     获取单条笔记的详细内容
     """
-    result = getnote_request(f"/open/api/v1/resource/note/{note_id}")
+    result = getnote_request(f"/open/api/v1/resource/note/detail?note_id={note_id}")
     
     if not result or not result.get("success"):
         return None
