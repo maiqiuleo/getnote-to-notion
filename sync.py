@@ -27,7 +27,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 2
+SYNC_LAYOUT_VERSION = 3
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -511,12 +511,16 @@ def chunk_text(text, limit=1800):
     return chunks
 
 
+def make_rich_text(text):
+    return [{"type": "text", "text": {"content": text or ""}}]
+
+
 def paragraph_block(text, color="default"):
     return {
         "object": "block",
         "type": "paragraph",
         "paragraph": {
-            "rich_text": [{"type": "text", "text": {"content": text}}],
+            "rich_text": make_rich_text(text),
             "color": color,
         },
     }
@@ -526,15 +530,181 @@ def divider_block():
     return {"object": "block", "type": "divider", "divider": {}}
 
 
+def heading_block(level, text):
+    block_type = f"heading_{level}"
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {
+            "rich_text": make_rich_text(text),
+            "is_toggleable": False,
+            "color": "default",
+        },
+    }
+
+
+def bulleted_list_item_block(text):
+    return {
+        "object": "block",
+        "type": "bulleted_list_item",
+        "bulleted_list_item": {
+            "rich_text": make_rich_text(text),
+            "color": "default",
+        },
+    }
+
+
+def numbered_list_item_block(text):
+    return {
+        "object": "block",
+        "type": "numbered_list_item",
+        "numbered_list_item": {
+            "rich_text": make_rich_text(text),
+            "color": "default",
+        },
+    }
+
+
+def quote_block(text):
+    return {
+        "object": "block",
+        "type": "quote",
+        "quote": {
+            "rich_text": make_rich_text(text),
+            "color": "default",
+        },
+    }
+
+
+def code_block(text, language="plain text"):
+    supported_languages = {
+        "abap", "arduino", "bash", "basic", "c", "clojure", "coffeescript", "c++",
+        "c#", "css", "dart", "diff", "docker", "elixir", "elm", "erlang", "flow",
+        "fortran", "f#", "gherkin", "glsl", "go", "graphql", "groovy", "haskell",
+        "html", "java", "javascript", "json", "julia", "kotlin", "latex", "less",
+        "lisp", "livescript", "lua", "makefile", "markdown", "markup", "matlab",
+        "mermaid", "nix", "objective-c", "ocaml", "pascal", "perl", "php", "plain text",
+        "powershell", "prolog", "protobuf", "python", "r", "reason", "ruby", "rust",
+        "sass", "scala", "scheme", "scss", "shell", "sql", "swift", "typescript",
+        "vb.net", "verilog", "vhdl", "visual basic", "webassembly", "xml", "yaml", "java/c/c++/c#"
+    }
+    language = (language or "plain text").strip().lower()
+    if language not in supported_languages:
+        language = "plain text"
+    return {
+        "object": "block",
+        "type": "code",
+        "code": {
+            "rich_text": make_rich_text(text),
+            "caption": [],
+            "language": language,
+        },
+    }
+
+
+def markdown_to_blocks(content):
+    text = (content or "").replace("\r\n", "\n").strip()
+    if not text:
+        return [paragraph_block("（无内容）", color="gray")]
+
+    blocks = []
+    paragraph_lines = []
+    code_lines = []
+    in_code_block = False
+    code_language = "plain text"
+
+    def flush_paragraph():
+        nonlocal paragraph_lines
+        if not paragraph_lines:
+            return
+        paragraph_text = "\n".join(paragraph_lines).strip()
+        if paragraph_text:
+            for chunk in chunk_text(paragraph_text):
+                blocks.append(paragraph_block(chunk))
+        paragraph_lines = []
+
+    def flush_code():
+        nonlocal code_lines, code_language
+        code_text = "\n".join(code_lines).strip("\n")
+        if code_text:
+            for chunk in chunk_text(code_text):
+                blocks.append(code_block(chunk, code_language))
+        code_lines = []
+        code_language = "plain text"
+
+    for raw_line in text.split("\n"):
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if stripped.startswith("```"):
+            flush_paragraph()
+            if in_code_block:
+                flush_code()
+                in_code_block = False
+            else:
+                in_code_block = True
+                language = stripped[3:].strip()
+                if language:
+                    code_language = language
+            continue
+
+        if in_code_block:
+            code_lines.append(raw_line)
+            continue
+
+        if not stripped:
+            flush_paragraph()
+            continue
+
+        if stripped == "---" or stripped == "***":
+            flush_paragraph()
+            blocks.append(divider_block())
+            continue
+
+        if stripped.startswith("#"):
+            flush_paragraph()
+            heading_marks = len(stripped) - len(stripped.lstrip("#"))
+            if 1 <= heading_marks <= 3 and stripped[heading_marks:heading_marks + 1] == " ":
+                blocks.append(heading_block(heading_marks, stripped[heading_marks + 1:].strip()))
+                continue
+
+        if stripped.startswith("> "):
+            flush_paragraph()
+            quote_text = stripped[2:].strip()
+            if quote_text:
+                blocks.append(quote_block(quote_text))
+                continue
+
+        bullet_prefixes = ("- ", "* ", "+ ")
+        if stripped.startswith(bullet_prefixes):
+            flush_paragraph()
+            blocks.append(bulleted_list_item_block(stripped[2:].strip()))
+            continue
+
+        numbered_marker, dot, remainder = stripped.partition(". ")
+        if dot and numbered_marker.isdigit():
+            flush_paragraph()
+            blocks.append(numbered_list_item_block(remainder.strip()))
+            continue
+
+        paragraph_lines.append(line)
+
+    flush_paragraph()
+    if in_code_block:
+        flush_code()
+
+    return blocks[:100]
+
+
 def toggle_block(title, content):
-    child_blocks = [paragraph_block(chunk) for chunk in chunk_text(content)]
+    child_blocks = markdown_to_blocks(content)
     if not child_blocks:
         child_blocks = [paragraph_block("（无内容）", color="gray")]
     return {
         "object": "block",
         "type": "toggle",
         "toggle": {
-            "rich_text": [{"type": "text", "text": {"content": title}}],
+            "rich_text": make_rich_text(title),
             "children": child_blocks[:100],
             "color": "default",
         },
