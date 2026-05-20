@@ -147,14 +147,17 @@ def fetch_getnote_notes():
 
 def fetch_note_detail(note_id):
     """获取单条笔记详情。"""
-    result = getnote_request(f"/open/api/v1/resource/note/detail?note_id={note_id}")
+    result = getnote_request(f"/open/api/v1/resource/note/detail?id={note_id}")
     if not result:
         print(f"[WARN] 获取笔记详情失败: note_id={note_id}，请求未返回结果")
         return None
     if not result.get("success"):
         print(f"[WARN] 获取笔记详情失败: note_id={note_id}，message={result.get('message', '未知错误')}")
         return None
-    return result.get("data") or {}
+    data = result.get("data") or {}
+    if isinstance(data, dict) and isinstance(data.get("note"), dict):
+        return data.get("note") or {}
+    return data
 
 
 def get_note_id(note):
@@ -371,6 +374,23 @@ def extract_original_content(note, note_detail):
         text = normalize_text(get_nested_value(note_detail, path))
         if text:
             return text
+
+    return ""
+
+
+def extract_source_url(note, note_detail):
+    candidate_paths = (
+        "web_page.url",
+        "source_url",
+        "origin_url",
+        "url",
+        "link",
+    )
+
+    for path in candidate_paths:
+        value = normalize_text(get_nested_value(note_detail, path))
+        if value:
+            return value
 
     return ""
 
@@ -771,6 +791,7 @@ def build_notion_payload(note, note_detail):
     original_content = extract_original_content(note, note_detail)
     ai_content = extract_ai_note_content(note, note_detail)
     append_sections = extract_append_sections(note_detail)
+    source_url = extract_source_url(note, note_detail)
 
     if not title:
         seed_text = ai_content or original_content
@@ -810,6 +831,8 @@ def build_notion_payload(note, note_detail):
         meta_parts.append(f"知识库: {', '.join(topic_names)}")
     if tags:
         meta_parts.append(f"标签: {', '.join(tags)}")
+    if source_url:
+        meta_parts.append(f"原链接: {source_url}")
 
     children = [
         paragraph_block(" | ".join(meta_parts), color="gray"),
