@@ -27,7 +27,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 3
+SYNC_LAYOUT_VERSION = 4
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -353,15 +353,18 @@ def extract_original_content(note, note_detail):
         "original_content",
         "raw_content",
         "source_content",
+        "source_text",
+        "source_markdown",
+        "origin_content",
+        "origin_text",
+        "note_content",
+        "body",
+        "full_text",
         "web_page.content",
         "audio.original",
-        "audio.transcript",
         "transcript_original",
         "transcript_raw",
         "ocr_text",
-        "text",
-        "transcript",
-        "content",
     )
 
     for path in candidate_paths:
@@ -696,8 +699,53 @@ def markdown_to_blocks(content):
     return blocks[:100]
 
 
-def toggle_block(title, content):
-    child_blocks = markdown_to_blocks(content)
+def readable_text_to_blocks(content):
+    text = (content or "").replace("\r\n", "\n").strip()
+    if not text:
+        return [paragraph_block("（未获取到原文）", color="gray")]
+
+    blocks = []
+    paragraph_lines = []
+
+    def flush_paragraph():
+        nonlocal paragraph_lines
+        if not paragraph_lines:
+            return
+        paragraph_text = "\n".join(paragraph_lines).strip()
+        if paragraph_text:
+            for chunk in chunk_text(paragraph_text):
+                blocks.append(paragraph_block(chunk))
+        paragraph_lines = []
+
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            continue
+
+        bullet_prefixes = ("- ", "* ", "+ ", "• ")
+        if line.startswith(bullet_prefixes):
+            flush_paragraph()
+            blocks.append(bulleted_list_item_block(line[2:].strip()))
+            continue
+
+        numbered_marker, dot, remainder = line.partition(". ")
+        if dot and numbered_marker.isdigit():
+            flush_paragraph()
+            blocks.append(numbered_list_item_block(remainder.strip()))
+            continue
+
+        paragraph_lines.append(line)
+
+    flush_paragraph()
+    return blocks[:100]
+
+
+def toggle_block(title, content, render_mode="markdown"):
+    if render_mode == "plain":
+        child_blocks = readable_text_to_blocks(content)
+    else:
+        child_blocks = markdown_to_blocks(content)
     if not child_blocks:
         child_blocks = [paragraph_block("（无内容）", color="gray")]
     return {
@@ -766,10 +814,10 @@ def build_notion_payload(note, note_detail):
     children = [
         paragraph_block(" | ".join(meta_parts), color="gray"),
         divider_block(),
-        toggle_block("原文", original_content or ai_content),
+        toggle_block("原文", original_content, render_mode="plain"),
     ]
 
-    if ai_content and ai_content != original_content:
+    if ai_content:
         children.append(toggle_block("AI 笔记", ai_content))
 
     for title, content in append_sections:
