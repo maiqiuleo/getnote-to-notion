@@ -26,7 +26,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 5
+SYNC_LAYOUT_VERSION = 6
 
 TZ_CN = timezone(timedelta(hours=8))
 
