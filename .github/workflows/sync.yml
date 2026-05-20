@@ -1,6 +1,10 @@
 name: Sync Get笔记 to Notion
 
 on:
+  push:
+    paths:
+      - 'sync.py'
+      - '.github/workflows/sync.yml'
   schedule:
     # 每 10 分钟运行一次
     - cron: '*/10 * * * *'
