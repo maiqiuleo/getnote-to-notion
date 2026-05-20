@@ -876,6 +876,8 @@ def update_notion_page(page_id, properties, children):
         return None
 
     for block in list_block_children(page_id):
+        if block.get("archived"):
+            continue
         archive_block(block.get("id"))
 
     if not append_block_children(page_id, children):
