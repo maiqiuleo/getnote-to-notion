@@ -26,7 +26,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 4
+SYNC_LAYOUT_VERSION = 5
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -565,6 +565,22 @@ def heading_block(level, text):
     }
 
 
+def toggleable_heading_block(level, text, children=None):
+    block_type = f"heading_{level}"
+    heading_data = {
+        "rich_text": make_rich_text(text),
+        "is_toggleable": True,
+        "color": "default",
+    }
+    if children:
+        heading_data["children"] = children[:100]
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: heading_data,
+    }
+
+
 def bulleted_list_item_block(text):
     return {
         "object": "block",
@@ -778,6 +794,16 @@ def toggle_block(title, content, render_mode="markdown"):
     }
 
 
+def section_heading_block(level, title, content, render_mode="markdown"):
+    if render_mode == "plain":
+        child_blocks = readable_text_to_blocks(content)
+    else:
+        child_blocks = markdown_to_blocks(content)
+    if not child_blocks:
+        child_blocks = [paragraph_block("（无内容）", color="gray")]
+    return toggleable_heading_block(level, title, child_blocks)
+
+
 def build_notion_payload(note, note_detail):
     """构建 Notion 页面属性与内容。"""
     note_id = get_note_id(note)
@@ -820,6 +846,8 @@ def build_notion_payload(note, note_detail):
 
     if topic_names:
         properties["知识库"] = {"select": {"name": topic_names[0][:100]}}
+    if source_url:
+        properties["原文链接"] = {"url": source_url}
 
     meta_parts = ["来源: Get笔记"]
     if created_at:
@@ -830,20 +858,20 @@ def build_notion_payload(note, note_detail):
         meta_parts.append(f"知识库: {', '.join(topic_names)}")
     if tags:
         meta_parts.append(f"标签: {', '.join(tags)}")
-    if source_url:
-        meta_parts.append(f"原链接: {source_url}")
+
+    append_children = []
+    for append_title, content in append_sections:
+        append_children.append(section_heading_block(3, append_title[:100], content))
+    if not append_children:
+        append_children = [paragraph_block("（无追加笔记）", color="gray")]
 
     children = [
         paragraph_block(" | ".join(meta_parts), color="gray"),
         divider_block(),
-        toggle_block("原文", original_content, render_mode="plain"),
+        section_heading_block(2, "原文", original_content, render_mode="plain"),
+        section_heading_block(2, "AI 笔记", ai_content),
+        toggleable_heading_block(2, "追加笔记", append_children),
     ]
-
-    if ai_content:
-        children.append(toggle_block("AI 笔记", ai_content))
-
-    for title, content in append_sections:
-        children.append(toggle_block(title[:100], content))
 
     return properties, children[:100]
 
@@ -892,6 +920,10 @@ def create_notion_page(properties, children):
     return notion_request("/pages", body)
 
 
+def archive_notion_page(page_id):
+    return notion_request(f"/pages/{page_id}", {"archived": True}, method="PATCH")
+
+
 def update_notion_page(page_id, properties, children):
     update_result = notion_request(f"/pages/{page_id}", {"properties": properties}, method="PATCH")
     if not update_result:
@@ -935,6 +967,18 @@ def sync_note(note, sync_state):
         existing_page = query_notion_page_by_note_id(note_id)
         if existing_page:
             page_id = existing_page.get("id")
+
+    if not is_note_in_database(note, note_detail):
+        if page_id:
+            archived = archive_notion_page(page_id)
+            if archived:
+                sync_state.pop(note_id, None)
+                print(f"   🗂️ 已移出同步范围并归档: {note.get('title', '')[:30] or '(无标题)'}...")
+                return True, note_id
+            print(f"   ❌ 归档超出范围页面失败: {note.get('title', '')[:30] or '(无标题)'}...")
+            return False, note_id
+        print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
+        return True, note_id
 
     properties, children = build_notion_payload(note, note_detail)
 
