@@ -743,7 +743,26 @@ def main():
     recent_notes = filter_notes_by_time(all_notes, CHECK_HOURS)
     print(f"[INFO] 最近 {CHECK_HOURS} 小时内有更新的笔记: {len(recent_notes)} 条")
 
-    notes_to_sync = [note for note in recent_notes if needs_sync(note, sync_state)]
+    layout_refresh_notes = []
+    for note in all_notes:
+        note_id = get_note_id(note)
+        state_entry = sync_state.get(note_id, {})
+        if state_entry and state_entry.get("layout_version") != SYNC_LAYOUT_VERSION:
+            layout_refresh_notes.append(note)
+
+    if layout_refresh_notes:
+        print(f"[INFO] 需要重建新结构的旧笔记: {len(layout_refresh_notes)} 条")
+
+    candidate_notes = []
+    seen_note_ids = set()
+    for note in recent_notes + layout_refresh_notes:
+        note_id = get_note_id(note)
+        if note_id in seen_note_ids:
+            continue
+        seen_note_ids.add(note_id)
+        candidate_notes.append(note)
+
+    notes_to_sync = [note for note in candidate_notes if needs_sync(note, sync_state)]
     print(f"[INFO] 需要创建/更新的笔记: {len(notes_to_sync)} 条")
 
     if not notes_to_sync:
