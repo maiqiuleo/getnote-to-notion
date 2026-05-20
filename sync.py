@@ -10,6 +10,7 @@ Get 笔记 → Notion get 笔记数据库 自动同步
 
 import json
 import os
+import re
 import ssl
 import sys
 from datetime import datetime, timedelta, timezone
@@ -26,7 +27,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 6
+SYNC_LAYOUT_VERSION = 7
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -258,6 +259,69 @@ def normalize_text(value):
     return str(value).strip()
 
 
+def collapse_blank_lines(text):
+    text = (text or "").replace("\r\n", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def is_probably_image_url(value):
+    if not value:
+        return False
+    normalized = value.strip().lower()
+    return bool(re.search(r"\.(png|jpe?g|gif|webp|svg|bmp|heic)(\?.*)?$", normalized))
+
+
+def strip_non_text_media(text):
+    cleaned = (text or "").replace("\r\n", "\n")
+    cleaned = re.sub(r"<img\b[^>]*>", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"!\[[^\]]*\]\(([^)]+)\)", "", cleaned)
+
+    filtered_lines = []
+    for raw_line in cleaned.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            filtered_lines.append("")
+            continue
+        if is_probably_image_url(line):
+            continue
+        filtered_lines.append(raw_line)
+
+    return collapse_blank_lines("\n".join(filtered_lines))
+
+
+def normalize_ai_markdown(text):
+    cleaned = strip_non_text_media(text)
+    if not cleaned:
+        return ""
+
+    normalized_lines = []
+    for raw_line in cleaned.split("\n"):
+        line = raw_line.rstrip()
+        stripped = line.strip()
+
+        if not stripped:
+            normalized_lines.append("")
+            continue
+
+        heading_match = re.fullmatch(r"\*\*(.+?)\*\*[:：]?", stripped) or re.fullmatch(r"__(.+?)__[:：]?", stripped)
+        if heading_match:
+            heading_text = heading_match.group(1).strip()
+            if heading_text:
+                normalized_lines.append(f"## {heading_text}")
+                continue
+
+        if not stripped.startswith("#") and len(stripped) <= 30 and stripped.endswith(("：", ":")):
+            normalized_lines.append(f"## {stripped[:-1].strip()}")
+            continue
+
+        line = re.sub(r"^\s*[•●◦▪▫■□]\s+", "- ", line)
+        line = re.sub(r"^(\s*)(\d+)[\)）、]\s+", r"\1\2. ", line)
+        normalized_lines.append(line)
+
+    return collapse_blank_lines("\n".join(normalized_lines))
+
+
 def extract_names(value):
     names = []
     if isinstance(value, list):
@@ -372,7 +436,7 @@ def extract_original_content(note, note_detail):
     for path in candidate_paths:
         text = normalize_text(get_nested_value(note_detail, path))
         if text:
-            return text
+            return strip_non_text_media(text)
 
     return ""
 
@@ -411,7 +475,7 @@ def extract_ai_note_content(note, note_detail):
     for path in candidate_paths:
         text = normalize_text(get_nested_value(note_detail, path))
         if text:
-            return text
+            return normalize_ai_markdown(text)
 
     return ""
 
