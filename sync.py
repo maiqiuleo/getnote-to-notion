@@ -931,7 +931,13 @@ def sync_note(note, sync_state):
         print(f"   ⚠️ 详情缺失，使用列表数据继续同步: {note.get('title', '')[:30] or '(无标题)'}...")
         note_detail = note
 
-    should_force_backfill = bool(state_entry.get("page_id")) and state_entry.get("layout_version") != SYNC_LAYOUT_VERSION
+    page_id = state_entry.get("page_id")
+    if not page_id:
+        existing_page = query_notion_page_by_note_id(note_id)
+        if existing_page:
+            page_id = existing_page.get("id")
+
+    should_force_backfill = bool(page_id) and state_entry.get("layout_version") != SYNC_LAYOUT_VERSION
 
     if not is_note_in_database(note, note_detail) and not should_force_backfill:
         print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
@@ -940,12 +946,6 @@ def sync_note(note, sync_state):
         print(f"   🔄 旧页面原文回填: {note.get('title', '')[:30] or '(无标题)'}...")
 
     properties, children = build_notion_payload(note, note_detail)
-    page_id = state_entry.get("page_id")
-
-    if not page_id:
-        existing_page = query_notion_page_by_note_id(note_id)
-        if existing_page:
-            page_id = existing_page.get("id")
 
     if page_id:
         result = update_notion_page(page_id, properties, children)
