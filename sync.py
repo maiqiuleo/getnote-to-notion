@@ -148,7 +148,11 @@ def fetch_getnote_notes():
 def fetch_note_detail(note_id):
     """获取单条笔记详情。"""
     result = getnote_request(f"/open/api/v1/resource/note/detail?note_id={note_id}")
-    if not result or not result.get("success"):
+    if not result:
+        print(f"[WARN] 获取笔记详情失败: note_id={note_id}，请求未返回结果")
+        return None
+    if not result.get("success"):
+        print(f"[WARN] 获取笔记详情失败: note_id={note_id}，message={result.get('message', '未知错误')}")
         return None
     return result.get("data") or {}
 
@@ -680,8 +684,8 @@ def sync_note(note, sync_state):
     note_id = get_note_id(note)
     note_detail = fetch_note_detail(note_id)
     if not note_detail:
-        print(f"   ❌ 获取详情失败: {note.get('title', '')[:30] or '(无标题)'}...")
-        return False, note_id
+        print(f"   ⚠️ 详情缺失，使用列表数据继续同步: {note.get('title', '')[:30] or '(无标题)'}...")
+        note_detail = note
 
     if not is_note_in_database(note, note_detail):
         print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
