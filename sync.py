@@ -923,6 +923,9 @@ def sync_note(note, sync_state):
     if page_id:
         result = update_notion_page(page_id, properties, children)
         action = "更新"
+        if not result:
+            result = create_notion_page(properties, children)
+            action = "重建"
     else:
         result = create_notion_page(properties, children)
         action = "创建"
