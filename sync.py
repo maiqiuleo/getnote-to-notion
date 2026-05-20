@@ -3,7 +3,6 @@
 Get 笔记 → Notion get 笔记数据库 自动同步
 
 功能：
-- 仅同步已归入 Get 数据库/知识库的笔记
 - 按最近更新时间检查需要同步的笔记
 - 首次创建，后续更新（支持 AI 笔记/追加笔记变更后重新同步）
 - 保留标签、知识库分类、创建时间等元数据
@@ -936,14 +935,6 @@ def sync_note(note, sync_state):
         existing_page = query_notion_page_by_note_id(note_id)
         if existing_page:
             page_id = existing_page.get("id")
-
-    should_force_backfill = bool(page_id) and state_entry.get("layout_version") != SYNC_LAYOUT_VERSION
-
-    if not is_note_in_database(note, note_detail) and not should_force_backfill:
-        print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
-        return True, note_id
-    if should_force_backfill and not is_note_in_database(note, note_detail):
-        print(f"   🔄 旧页面原文回填: {note.get('title', '')[:30] or '(无标题)'}...")
 
     properties, children = build_notion_payload(note, note_detail)
 
