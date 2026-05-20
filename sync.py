@@ -849,16 +849,6 @@ def build_notion_payload(note, note_detail):
     if source_url:
         properties["原文链接"] = {"url": source_url}
 
-    meta_parts = ["来源: Get笔记"]
-    if created_at:
-        meta_parts.append(f"创建时间: {created_at}")
-    if updated_at and updated_at != created_at:
-        meta_parts.append(f"更新时间: {updated_at}")
-    if topic_names:
-        meta_parts.append(f"知识库: {', '.join(topic_names)}")
-    if tags:
-        meta_parts.append(f"标签: {', '.join(tags)}")
-
     append_children = []
     for append_title, content in append_sections:
         append_children.append(section_heading_block(3, append_title[:100], content))
@@ -866,8 +856,6 @@ def build_notion_payload(note, note_detail):
         append_children = [paragraph_block("（无追加笔记）", color="gray")]
 
     children = [
-        paragraph_block(" | ".join(meta_parts), color="gray"),
-        divider_block(),
         section_heading_block(2, "原文", original_content, render_mode="plain"),
         section_heading_block(2, "AI 笔记", ai_content),
         toggleable_heading_block(2, "追加笔记", append_children),
