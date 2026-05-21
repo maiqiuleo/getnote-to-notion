@@ -27,7 +27,7 @@ NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
-SYNC_LAYOUT_VERSION = 7
+SYNC_LAYOUT_VERSION = 9
 
 TZ_CN = timezone(timedelta(hours=8))
 
@@ -265,6 +265,19 @@ def collapse_blank_lines(text):
     return text.strip()
 
 
+def strip_inline_markdown(text):
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"!\[[^\]]*\]\(([^)]+)\)", "", cleaned)
+    cleaned = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"(\*\*|__)(.*?)\1", r"\2", cleaned)
+    cleaned = re.sub(r"(\*|_)(.*?)\1", r"\2", cleaned)
+    cleaned = re.sub(r"~~(.*?)~~", r"\1", cleaned)
+    return cleaned.strip()
+
+
 def is_probably_image_url(value):
     if not value:
         return False
@@ -296,30 +309,199 @@ def normalize_ai_markdown(text):
         return ""
 
     normalized_lines = []
+    table_rows = []
+
+    def flush_table_rows():
+        nonlocal table_rows
+        if not table_rows:
+            return
+
+        parsed_rows = []
+        for row in table_rows:
+            stripped_row = row.strip()
+            if not (stripped_row.startswith("|") and stripped_row.endswith("|")):
+                continue
+            columns = [strip_inline_markdown(col.strip()) for col in stripped_row.strip("|").split("|")]
+            if not any(columns):
+                continue
+            if all(re.fullmatch(r":?-{3,}:?", col.replace(" ", "")) for col in columns if col):
+                continue
+            parsed_rows.append(columns)
+
+        if not parsed_rows:
+            table_rows = []
+            return
+
+        header = parsed_rows[0]
+        body_rows = parsed_rows[1:]
+        if body_rows and len(header) > 1:
+            for row in body_rows:
+                label = row[0] if len(row) > 0 else ""
+                detail = "；".join(part for part in row[1:] if part)
+                merged = f"{label}：{detail}" if label and detail else label or detail
+                if merged:
+                    normalized_lines.append(f"- {merged}")
+        else:
+            for row in parsed_rows:
+                merged = "；".join(part for part in row if part)
+                if merged:
+                    normalized_lines.append(f"- {merged}")
+
+        table_rows = []
+
     for raw_line in cleaned.split("\n"):
         line = raw_line.rstrip()
         stripped = line.strip()
 
         if not stripped:
+            flush_table_rows()
             normalized_lines.append("")
+            continue
+
+        if stripped.startswith("|") and stripped.endswith("|"):
+            table_rows.append(stripped)
+            continue
+
+        flush_table_rows()
+
+        if re.fullmatch(r"[•●◦▪▫■□]+", stripped):
             continue
 
         heading_match = re.fullmatch(r"\*\*(.+?)\*\*[:：]?", stripped) or re.fullmatch(r"__(.+?)__[:：]?", stripped)
         if heading_match:
             heading_text = heading_match.group(1).strip()
             if heading_text:
-                normalized_lines.append(f"## {heading_text}")
+                normalized_lines.append(f"## {strip_inline_markdown(heading_text)}")
                 continue
 
+        inline_heading_match = re.match(r"^(?:\*\*|__)(.+?)(?:\*\*|__)[:：]\s*(.+)$", stripped)
+        if inline_heading_match:
+            heading_text = strip_inline_markdown(inline_heading_match.group(1))
+            body_text = strip_inline_markdown(inline_heading_match.group(2))
+            if heading_text:
+                normalized_lines.append(f"## {heading_text}")
+            if body_text:
+                normalized_lines.append(body_text)
+            continue
+
         if not stripped.startswith("#") and len(stripped) <= 30 and stripped.endswith(("：", ":")):
-            normalized_lines.append(f"## {stripped[:-1].strip()}")
+            normalized_lines.append(f"## {strip_inline_markdown(stripped[:-1].strip())}")
+            continue
+
+        heading_mark_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if heading_mark_match:
+            heading_level = min(len(heading_mark_match.group(1)), 3)
+            heading_text = strip_inline_markdown(heading_mark_match.group(2))
+            normalized_lines.append(f"{'#' * heading_level} {heading_text}")
             continue
 
         line = re.sub(r"^\s*[•●◦▪▫■□]\s+", "- ", line)
         line = re.sub(r"^(\s*)(\d+)[\)）、]\s+", r"\1\2. ", line)
-        normalized_lines.append(line)
+        if re.match(r"^\s*[-*+]\s+", line):
+            prefix, content = re.match(r"^(\s*[-*+]\s+)(.+)$", line).groups()
+            normalized_lines.append(f"{prefix}{strip_inline_markdown(content)}")
+            continue
+        numbered_match = re.match(r"^(\s*\d+\.\s+)(.+)$", line)
+        if numbered_match:
+            normalized_lines.append(f"{numbered_match.group(1)}{strip_inline_markdown(numbered_match.group(2))}")
+            continue
+
+        normalized_lines.append(strip_inline_markdown(line))
+
+    flush_table_rows()
 
     return collapse_blank_lines("\n".join(normalized_lines))
+
+
+def ai_text_to_blocks(content):
+    text = normalize_ai_markdown(content)
+    if not text:
+        return [paragraph_block("（无 AI 笔记）", color="gray")]
+
+    blocks = []
+    paragraph_lines = []
+    current_list_type = None
+
+    def flush_paragraph():
+        nonlocal paragraph_lines
+        if not paragraph_lines:
+            return
+        paragraph_text = "\n".join(paragraph_lines).strip()
+        if paragraph_text:
+            for chunk in chunk_text(paragraph_text):
+                blocks.append(paragraph_block(chunk))
+        paragraph_lines = []
+
+    def flush_list():
+        nonlocal current_list_type
+        current_list_type = None
+
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            continue
+
+        heading_match = re.match(r"^(#{1,3})\s+(.+)$", line)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            level = min(len(heading_match.group(1)), 3)
+            blocks.append(heading_block(level, heading_match.group(2).strip()))
+            continue
+
+        if line.startswith("> "):
+            flush_paragraph()
+            flush_list()
+            blocks.append(quote_block(line[2:].strip()))
+            continue
+
+        bullet_match = re.match(r"^[-*+]\s+(.+)$", line)
+        if bullet_match:
+            flush_paragraph()
+            current_list_type = "bullet"
+            blocks.append(bulleted_list_item_block(bullet_match.group(1).strip()))
+            continue
+
+        numbered_match = re.match(r"^(\d+)\.\s+(.+)$", line)
+        if numbered_match:
+            flush_paragraph()
+            current_list_type = "numbered"
+            blocks.append(numbered_list_item_block(numbered_match.group(2).strip()))
+            continue
+
+        label_value_match = re.match(r"^([^:：]{2,24})[:：]\s+(.+)$", line)
+        if label_value_match and not line.startswith(("http://", "https://")):
+            flush_paragraph()
+            flush_list()
+            label = strip_inline_markdown(label_value_match.group(1))
+            value = strip_inline_markdown(label_value_match.group(2))
+            if label:
+                blocks.append(heading_block(3, label))
+            if value:
+                if "；" in value or "; " in value:
+                    parts = [part.strip() for part in re.split(r"[；;]", value) if part.strip()]
+                    for part in parts:
+                        blocks.append(bulleted_list_item_block(part))
+                else:
+                    blocks.append(paragraph_block(value))
+            continue
+
+        if current_list_type and blocks:
+            last_block = blocks[-1]
+            block_type = "bulleted_list_item" if current_list_type == "bullet" else "numbered_list_item"
+            if last_block.get("type") == block_type:
+                rich_text = last_block[block_type].get("rich_text", [])
+                if rich_text and rich_text[0].get("type") == "text":
+                    previous = rich_text[0]["text"].get("content", "")
+                    rich_text[0]["text"]["content"] = f"{previous}\n{strip_inline_markdown(line)}"
+                    continue
+
+        paragraph_lines.append(strip_inline_markdown(line))
+
+    flush_paragraph()
+    return blocks[:100]
 
 
 def extract_names(value):
@@ -861,6 +1043,8 @@ def toggle_block(title, content, render_mode="markdown"):
 def section_heading_block(level, title, content, render_mode="markdown"):
     if render_mode == "plain":
         child_blocks = readable_text_to_blocks(content)
+    elif render_mode == "ai":
+        child_blocks = ai_text_to_blocks(content)
     else:
         child_blocks = markdown_to_blocks(content)
     if not child_blocks:
@@ -921,7 +1105,7 @@ def build_notion_payload(note, note_detail):
 
     children = [
         section_heading_block(2, "原文", original_content, render_mode="plain"),
-        section_heading_block(2, "AI 笔记", ai_content),
+        section_heading_block(2, "AI 笔记", ai_content, render_mode="ai"),
         toggleable_heading_block(2, "追加笔记", append_children),
     ]
 
