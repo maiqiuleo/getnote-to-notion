@@ -6,7 +6,7 @@ on:
       - 'sync.py'
       - '.github/workflows/sync.yml'
   schedule:
-    - cron: '*/10 * * * *'
+  - cron: '0 */6 * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [sync]
