@@ -582,6 +582,7 @@ def is_note_in_database(note, note_detail=None):
 
 
 def extract_tags(note, note_detail=None):
+    """提取笔记标签，过滤掉 system 类型的自动生成标签。"""
     tags = []
     sources = [note]
     if note_detail:
@@ -594,6 +595,9 @@ def extract_tags(note, note_detail=None):
         if isinstance(raw_tags, list):
             for item in raw_tags:
                 if isinstance(item, dict):
+                    # 过滤 system 类型（如"AI链接笔记"等自动标签），只保留 ai 和用户标签
+                    if item.get("type") == "system":
+                        continue
                     name = item.get("name") or item.get("tag_name") or item.get("title")
                     if name:
                         tags.append(str(name).strip())
@@ -601,6 +605,19 @@ def extract_tags(note, note_detail=None):
                     tags.append(item.strip())
 
     return unique_list(tags)[:10]
+
+
+def extract_knowledge_base(note, note_detail=None):
+    """从 topics 字段提取知识库名称（Get 笔记 API 实际字段名）。"""
+    for source in [note, note_detail]:
+        if not isinstance(source, dict):
+            continue
+        topics = source.get("topics") or []
+        if isinstance(topics, list) and topics:
+            name = topics[0].get("name") or ""
+            if name:
+                return name.strip()
+    return ""
 
 
 def extract_original_content(note, note_detail):
@@ -631,6 +648,7 @@ def extract_original_content(note, note_detail):
 
 
 def extract_source_url(note, note_detail):
+    # 优先取 web_page.url 和常见路径
     candidate_paths = (
         "web_page.url",
         "source_url",
@@ -638,11 +656,16 @@ def extract_source_url(note, note_detail):
         "url",
         "link",
     )
-
     for path in candidate_paths:
         value = normalize_text(get_nested_value(note_detail, path))
         if value:
             return value
+
+    # 兜底：从 attachments 里取第一个 link 类型的 url
+    attachments = note_detail.get("attachments") or [] if isinstance(note_detail, dict) else []
+    for att in attachments:
+        if isinstance(att, dict) and att.get("url"):
+            return str(att["url"]).strip()
 
     return ""
 
@@ -1065,7 +1088,8 @@ def build_notion_payload(note, note_detail):
     created_at = get_note_created_at(note)
     title = (note.get("title") or "").strip()
 
-    topic_names = extract_topic_names(note, note_detail)
+    knowledge_base = extract_knowledge_base(note, note_detail)
+    note_type = (note.get("note_type") or note_detail.get("note_type") if isinstance(note_detail, dict) else None) or "other"
     tags = extract_tags(note, note_detail)
     original_content = extract_original_content(note, note_detail)
     ai_content = extract_ai_note_content(note, note_detail)
@@ -1086,7 +1110,7 @@ def build_notion_payload(note, note_detail):
             "rich_text": [{"text": {"content": note_id}}]
         },
         "笔记类型": {
-            "select": {"name": "plain_text"}
+            "select": {"name": note_type[:100]}
         },
     }
 
@@ -1098,8 +1122,9 @@ def build_notion_payload(note, note_detail):
     if tags:
         properties["标签"] = {"multi_select": [{"name": tag} for tag in tags]}
 
-    if topic_names:
-        properties["知识库"] = {"select": {"name": topic_names[0][:100]}}
+    if knowledge_base:
+        properties["知识库"] = {"select": {"name": knowledge_base[:100]}}
+
     if source_url:
         properties["原文链接"] = {"url": source_url}
 
@@ -1193,19 +1218,7 @@ def sync_note(note, synced_ids):
     existing_page = query_notion_page_by_note_id(note_id)
     page_id = existing_page.get("id") if existing_page else None
 
-    if not is_note_in_database(note, note_detail):
-        if page_id:
-            archived = archive_notion_page(page_id)
-            if archived:
-                synced_ids.add(note_id)
-                print(f"   🗂️ 已移出同步范围并归档: {note.get('title', '')[:30] or '(无标题)'}...")
-                return True, note_id
-            print(f"   ❌ 归档超出范围页面失败: {note.get('title', '')[:30] or '(无标题)'}...")
-            return False, note_id
-        print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
-        synced_ids.add(note_id)
-        return True, note_id
-
+    # 同步所有笔记，无论是否归入知识库（topics 为空时知识库字段留空）
     properties, children = build_notion_payload(note, note_detail)
 
     if page_id:
