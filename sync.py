@@ -13,19 +13,19 @@ import os
 import re
 import ssl
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 # ============ 配置 ============
 GETNOTE_API_KEY = os.environ.get("GETNOTE_API_KEY", "")
-GETNOTE_CLIENT_ID = os.environ.get("GETNOTE_CLIENT_ID", "cli_3802f9db08b811f197679c63c078bacc")
+GETNOTE_CLIENT_ID = os.environ.get("GETNOTE_CLIENT_ID", "")
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 NOTION_VERSION = "2022-06-28"
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
-SYNC_STATE_FILE = os.path.join(os.path.dirname(__file__), "processed_ids.json")
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
 SYNC_LAYOUT_VERSION = 9
 
@@ -34,80 +34,87 @@ TZ_CN = timezone(timedelta(hours=8))
 
 # ============ 辅助函数 ============
 
-def load_sync_state():
-    """加载同步状态，兼容旧版 list 结构。"""
-    try:
-        if not os.path.exists(SYNC_STATE_FILE):
-            return {}
-
-        with open(SYNC_STATE_FILE, "r") as f:
-            data = json.load(f)
-
-        if isinstance(data, list):
-            # 兼容旧版：仅记录已同步 ID
-            return {str(note_id): {"legacy": True} for note_id in data}
-        if isinstance(data, dict):
-            return data
-    except Exception as e:
-        print(f"[WARN] 加载同步状态失败: {e}")
-
-    return {}
-
-
-def save_sync_state(sync_state):
-    """保存同步状态。"""
-    try:
-        with open(SYNC_STATE_FILE, "w") as f:
-            json.dump(sync_state, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[ERROR] 保存同步状态失败: {e}")
-
-
 def getnote_request(path, method="GET", body=None):
-    """发送 Get 笔记 API 请求。"""
+    """发送 Get 笔记 API 请求（含指数退避重试）。"""
     url = f"https://openapi.biji.com{path}"
     data = json.dumps(body).encode() if body is not None else None
 
-    req = Request(url, data=data, method=method)
-    req.add_header("Authorization", GETNOTE_API_KEY)
-    req.add_header("X-Client-ID", GETNOTE_CLIENT_ID)
-    if body is not None:
-        req.add_header("Content-Type", "application/json")
+    for attempt in range(3):
+        req = Request(url, data=data, method=method)
+        req.add_header("Authorization", GETNOTE_API_KEY)
+        req.add_header("X-Client-ID", GETNOTE_CLIENT_ID)
+        if body is not None:
+            req.add_header("Content-Type", "application/json")
 
-    ctx = ssl.create_default_context()
-    try:
-        with urlopen(req, context=ctx, timeout=30) as resp:
-            return json.loads(resp.read())
-    except HTTPError as e:
-        error_body = e.read().decode()[:800]
-        print(f"[ERROR] Get笔记 API error {e.code}: {error_body}")
-        return None
-    except Exception as e:
-        print(f"[ERROR] Get笔记 request failed: {e}")
-        return None
+        ctx = ssl.create_default_context()
+        try:
+            with urlopen(req, context=ctx, timeout=30) as resp:
+                return json.loads(resp.read())
+        except HTTPError as e:
+            if e.code == 429:
+                wait = 30
+                print(f"[WARN] Get笔记 API 限流 (429)，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            error_body = e.read().decode()[:800]
+            print(f"[ERROR] Get笔记 API error {e.code}: {error_body}")
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(f"[WARN] 第 {attempt + 1} 次重试，等待 {wait}s...")
+                time.sleep(wait)
+                continue
+            return None
+        except Exception as e:
+            print(f"[ERROR] Get笔记 request failed: {e}")
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(f"[WARN] 第 {attempt + 1} 次重试，等待 {wait}s...")
+                time.sleep(wait)
+                continue
+            return None
+
+    return None
 
 
 def notion_request(path, body=None, method="POST"):
-    """发送 Notion API 请求。"""
+    """发送 Notion API 请求（含指数退避重试）。"""
     url = f"https://api.notion.com/v1{path}"
     data = json.dumps(body).encode() if body is not None else None
 
-    req = Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {NOTION_TOKEN}")
-    req.add_header("Notion-Version", NOTION_VERSION)
-    req.add_header("Content-Type", "application/json")
+    for attempt in range(3):
+        req = Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {NOTION_TOKEN}")
+        req.add_header("Notion-Version", NOTION_VERSION)
+        req.add_header("Content-Type", "application/json")
 
-    ctx = ssl.create_default_context()
-    try:
-        with urlopen(req, context=ctx, timeout=30) as resp:
-            return json.loads(resp.read())
-    except HTTPError as e:
-        error_body = e.read().decode()[:1200]
-        print(f"[ERROR] Notion API error {e.code}: {error_body}")
-        return None
-    except Exception as e:
-        print(f"[ERROR] Notion request failed: {e}")
-        return None
+        ctx = ssl.create_default_context()
+        try:
+            with urlopen(req, context=ctx, timeout=30) as resp:
+                return json.loads(resp.read())
+        except HTTPError as e:
+            if e.code == 429:
+                wait = 30
+                print(f"[WARN] Notion API 限流 (429)，等待 {wait}s 后重试...")
+                time.sleep(wait)
+                continue
+            error_body = e.read().decode()[:1200]
+            print(f"[ERROR] Notion API error {e.code}: {error_body}")
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(f"[WARN] 第 {attempt + 1} 次重试，等待 {wait}s...")
+                time.sleep(wait)
+                continue
+            return None
+        except Exception as e:
+            print(f"[ERROR] Notion request failed: {e}")
+            if attempt < 2:
+                wait = 2 ** attempt
+                print(f"[WARN] 第 {attempt + 1} 次重试，等待 {wait}s...")
+                time.sleep(wait)
+                continue
+            return None
+
+    return None
 
 
 def fetch_getnote_notes():
@@ -1056,7 +1063,6 @@ def build_notion_payload(note, note_detail):
     """构建 Notion 页面属性与内容。"""
     note_id = get_note_id(note)
     created_at = get_note_created_at(note)
-    updated_at = get_note_updated_at(note, note_detail)
     title = (note.get("title") or "").strip()
 
     topic_names = extract_topic_names(note, note_detail)
@@ -1176,44 +1182,29 @@ def update_notion_page(page_id, properties, children):
     return update_result
 
 
-def needs_sync(note, sync_state):
+def sync_note(note, synced_ids):
+    """同步单条笔记到 Notion。状态完全依赖 Notion 反查，synced_ids 仅用于单次运行内去重。"""
     note_id = get_note_id(note)
-    entry = sync_state.get(note_id, {})
-    note_updated_at = get_note_updated_at(note)
-
-    if not entry:
-        return True
-    if entry.get("layout_version") != SYNC_LAYOUT_VERSION:
-        return True
-    if note_updated_at and entry.get("updated_at") != note_updated_at:
-        return True
-    return False
-
-
-def sync_note(note, sync_state):
-    note_id = get_note_id(note)
-    state_entry = sync_state.get(note_id, {})
     note_detail = fetch_note_detail(note_id)
     if not note_detail:
         print(f"   ⚠️ 详情缺失，使用列表数据继续同步: {note.get('title', '')[:30] or '(无标题)'}...")
         note_detail = note
 
-    page_id = state_entry.get("page_id")
-    if not page_id:
-        existing_page = query_notion_page_by_note_id(note_id)
-        if existing_page:
-            page_id = existing_page.get("id")
+    # 查询 Notion 是否已有此页面
+    existing_page = query_notion_page_by_note_id(note_id)
+    page_id = existing_page.get("id") if existing_page else None
 
     if not is_note_in_database(note, note_detail):
         if page_id:
             archived = archive_notion_page(page_id)
             if archived:
-                sync_state.pop(note_id, None)
+                synced_ids.add(note_id)
                 print(f"   🗂️ 已移出同步范围并归档: {note.get('title', '')[:30] or '(无标题)'}...")
                 return True, note_id
             print(f"   ❌ 归档超出范围页面失败: {note.get('title', '')[:30] or '(无标题)'}...")
             return False, note_id
         print(f"   ⏭️ 未归入数据库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
+        synced_ids.add(note_id)
         return True, note_id
 
     properties, children = build_notion_payload(note, note_detail)
@@ -1229,12 +1220,7 @@ def sync_note(note, sync_state):
         action = "创建"
 
     if result and result.get("id"):
-        sync_state[note_id] = {
-            "page_id": result.get("id"),
-            "updated_at": get_note_updated_at(note, note_detail),
-            "layout_version": SYNC_LAYOUT_VERSION,
-            "synced_at": datetime.now(TZ_CN).isoformat(),
-        }
+        synced_ids.add(note_id)
         print(f"   ✅ {action}成功: {note.get('title', '')[:30] or '(无标题)'}...")
         return True, note_id
 
@@ -1252,6 +1238,9 @@ def main():
     if not GETNOTE_API_KEY:
         print("[ERROR] GETNOTE_API_KEY 未配置")
         sys.exit(1)
+    if not GETNOTE_CLIENT_ID:
+        print("[ERROR] GETNOTE_CLIENT_ID 未配置")
+        sys.exit(1)
     if not NOTION_TOKEN:
         print("[ERROR] NOTION_TOKEN 未配置")
         sys.exit(1)
@@ -1259,8 +1248,8 @@ def main():
         print("[ERROR] NOTION_DB_ID 未配置")
         sys.exit(1)
 
-    sync_state = load_sync_state()
-    print(f"[INFO] 已有同步记录: {len(sync_state)} 条")
+    # 使用内存 set 在单次运行内去重，跨运行去重依赖 Notion 反查
+    synced_ids = set()
 
     print("[INFO] 正在拉取 Get 笔记...")
     all_notes = fetch_getnote_notes()
@@ -1271,56 +1260,40 @@ def main():
     recent_notes = filter_notes_by_time(all_notes, CHECK_HOURS)
     print(f"[INFO] 最近 {CHECK_HOURS} 小时内有更新的笔记: {len(recent_notes)} 条")
 
-    layout_refresh_notes = []
-    for note in all_notes:
-        note_id = get_note_id(note)
-        state_entry = sync_state.get(note_id, {})
-        if state_entry and state_entry.get("layout_version") != SYNC_LAYOUT_VERSION:
-            layout_refresh_notes.append(note)
-
-    if layout_refresh_notes:
-        print(f"[INFO] 需要重建新结构的旧笔记: {len(layout_refresh_notes)} 条")
-
+    # 去重（同一运行内）
     candidate_notes = []
     seen_note_ids = set()
-    for note in recent_notes + layout_refresh_notes:
+    for note in recent_notes:
         note_id = get_note_id(note)
         if note_id in seen_note_ids:
             continue
         seen_note_ids.add(note_id)
         candidate_notes.append(note)
 
-    notes_to_sync = [note for note in candidate_notes if needs_sync(note, sync_state)]
-    print(f"[INFO] 需要创建/更新的笔记: {len(notes_to_sync)} 条")
+    print(f"[INFO] 需要处理的笔记: {len(candidate_notes)} 条")
 
-    if not notes_to_sync:
+    if not candidate_notes:
         print("✨ 没有新的笔记需要同步")
         return
 
     success_count = 0
 
-    for index, note in enumerate(notes_to_sync, 1):
+    for index, note in enumerate(candidate_notes, 1):
         note_title = note.get("title", "")[:30] or "(无标题)"
-        print(f"\n[{index}/{len(notes_to_sync)}] 正在同步: {note_title}...")
+        print(f"\n[{index}/{len(candidate_notes)}] 正在同步: {note_title}...")
 
-        success, _ = sync_note(note, sync_state)
+        success, _ = sync_note(note, synced_ids)
         if success:
             success_count += 1
 
-        if index % 5 == 0:
-            save_sync_state(sync_state)
-
-    save_sync_state(sync_state)
-
     print("\n" + "=" * 60)
     print("🎉 同步完成!")
-    print(f"   本次尝试: {len(notes_to_sync)} 条")
+    print(f"   本次尝试: {len(candidate_notes)} 条")
     print(f"   同步成功: {success_count} 条")
-    print(f"   同步失败: {len(notes_to_sync) - success_count} 条")
-    print(f"   累计同步记录: {len(sync_state)} 条")
+    print(f"   同步失败: {len(candidate_notes) - success_count} 条")
     print("=" * 60)
 
-    if success_count < len(notes_to_sync):
+    if success_count < len(candidate_notes):
         sys.exit(1)
 
 
