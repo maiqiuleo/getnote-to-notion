@@ -1218,7 +1218,21 @@ def sync_note(note, synced_ids):
     existing_page = query_notion_page_by_note_id(note_id)
     page_id = existing_page.get("id") if existing_page else None
 
-    # 同步所有笔记，无论是否归入知识库（topics 为空时知识库字段留空）
+    # 门控：只同步已归入知识库（topics 不为空）的笔记
+    knowledge_base = extract_knowledge_base(note, note_detail)
+    if not knowledge_base:
+        if page_id:
+            archived = archive_notion_page(page_id)
+            if archived:
+                synced_ids.add(note_id)
+                print(f"   🗂️ 已移出知识库，归档: {note.get('title', '')[:30] or '(无标题)'}...")
+                return True, note_id
+            print(f"   ❌ 归档失败: {note.get('title', '')[:30] or '(无标题)'}...")
+            return False, note_id
+        print(f"   ⏭️ 未归入知识库，跳过: {note.get('title', '')[:30] or '(无标题)'}...")
+        synced_ids.add(note_id)
+        return True, note_id
+
     properties, children = build_notion_payload(note, note_detail)
 
     if page_id:
