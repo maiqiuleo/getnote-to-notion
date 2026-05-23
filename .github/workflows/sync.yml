@@ -5,6 +5,8 @@ on:
     paths:
       - 'sync.py'
       - '.github/workflows/sync.yml'
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [sync]
