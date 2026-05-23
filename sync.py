@@ -26,7 +26,7 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 NOTION_VERSION = "2022-06-28"
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
-CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "2"))
+CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "6"))
 SYNC_LAYOUT_VERSION = 9
 
 TZ_CN = timezone(timedelta(hours=8))
@@ -1190,7 +1190,6 @@ def sync_note(note, synced_ids):
         print(f"   ⚠️ 详情缺失，使用列表数据继续同步: {note.get('title', '')[:30] or '(无标题)'}...")
         note_detail = note
 
-    # 查询 Notion 是否已有此页面
     existing_page = query_notion_page_by_note_id(note_id)
     page_id = existing_page.get("id") if existing_page else None
 
@@ -1248,7 +1247,6 @@ def main():
         print("[ERROR] NOTION_DB_ID 未配置")
         sys.exit(1)
 
-    # 使用内存 set 在单次运行内去重，跨运行去重依赖 Notion 反查
     synced_ids = set()
 
     print("[INFO] 正在拉取 Get 笔记...")
@@ -1260,7 +1258,6 @@ def main():
     recent_notes = filter_notes_by_time(all_notes, CHECK_HOURS)
     print(f"[INFO] 最近 {CHECK_HOURS} 小时内有更新的笔记: {len(recent_notes)} 条")
 
-    # 去重（同一运行内）
     candidate_notes = []
     seen_note_ids = set()
     for note in recent_notes:
