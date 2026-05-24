@@ -6,7 +6,7 @@ on:
       - 'sync.py'
       - '.github/workflows/sync.yml'
   schedule:
-  - cron: '0 */6 * * *'
+    - cron: '0 */6 * * *'
   workflow_dispatch:
   repository_dispatch:
     types: [sync]
@@ -29,5 +29,5 @@ jobs:
           GETNOTE_CLIENT_ID: ${{ secrets.GETNOTE_CLIENT_ID }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
-          CHECK_HOURS: ${{ vars.CHECK_HOURS || '2' }}
-        run: python sync.py
+          CHECK_HOURS: ${{ vars.CHECK_HOURS || '6' }}
+        run: python3 sync.py
