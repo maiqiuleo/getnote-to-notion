@@ -27,9 +27,8 @@ NOTION_VERSION = "2022-06-28"
 NOTION_DB_ID = os.environ.get("NOTION_DB_ID", "")
 
 CHECK_HOURS = int(os.environ.get("CHECK_HOURS", "6"))
-SYNC_LAYOUT_VERSION = 9
 
-TZ_CN = timezone(timedelta(hours=8))
+TZ_CN = timezone(timedelta(hours=8))  # Get 笔记 API 返回时间均为北京时间（UTC+8）
 
 
 # ============ 辅助函数 ============
@@ -193,7 +192,8 @@ def parse_iso_datetime(value):
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
+            # Get 笔记 API 返回的无时区时间为北京时间（UTC+8），不是 UTC
+            return parsed.replace(tzinfo=TZ_CN)
         return parsed
     except Exception:
         return None
@@ -537,50 +537,6 @@ def extract_names(value):
     return unique_list(names)
 
 
-def extract_topic_names(note, note_detail=None):
-    """尽量从多种字段中推断 Get 中所属的数据库/知识库名称。"""
-    sources = [note]
-    if note_detail:
-        sources.append(note_detail)
-
-    names = []
-    candidate_keys = (
-        "topics",
-        "topic_list",
-        "databases",
-        "database_list",
-        "notebooks",
-        "folders",
-        "collections",
-        "spaces",
-    )
-    direct_keys = (
-        "topic_name",
-        "database_name",
-        "notebook_name",
-        "folder_name",
-        "collection_name",
-        "space_name",
-    )
-
-    for source in sources:
-        if not isinstance(source, dict):
-            continue
-        for key in candidate_keys:
-            if key in source:
-                names.extend(extract_names(source.get(key)))
-        for key in direct_keys:
-            value = source.get(key)
-            if value:
-                names.append(str(value).strip())
-
-    return unique_list(names)
-
-
-def is_note_in_database(note, note_detail=None):
-    return bool(extract_topic_names(note, note_detail))
-
-
 def extract_tags(note, note_detail=None):
     """提取笔记标签，过滤掉 system 类型的自动生成标签。"""
     tags = []
@@ -662,7 +618,7 @@ def extract_source_url(note, note_detail):
             return value
 
     # 兜底：从 attachments 里取第一个 link 类型的 url
-    attachments = note_detail.get("attachments") or [] if isinstance(note_detail, dict) else []
+    attachments = (note_detail.get("attachments") or []) if isinstance(note_detail, dict) else []
     for att in attachments:
         if isinstance(att, dict) and att.get("url"):
             return str(att["url"]).strip()
@@ -1052,24 +1008,6 @@ def readable_text_to_blocks(content):
     return blocks[:100]
 
 
-def toggle_block(title, content, render_mode="markdown"):
-    if render_mode == "plain":
-        child_blocks = readable_text_to_blocks(content)
-    else:
-        child_blocks = markdown_to_blocks(content)
-    if not child_blocks:
-        child_blocks = [paragraph_block("（无内容）", color="gray")]
-    return {
-        "object": "block",
-        "type": "toggle",
-        "toggle": {
-            "rich_text": make_rich_text(title),
-            "children": child_blocks[:100],
-            "color": "default",
-        },
-    }
-
-
 def section_heading_block(level, title, content, render_mode="markdown"):
     if render_mode == "plain":
         child_blocks = readable_text_to_blocks(content)
@@ -1089,7 +1027,7 @@ def build_notion_payload(note, note_detail):
     title = (note.get("title") or "").strip()
 
     knowledge_base = extract_knowledge_base(note, note_detail)
-    note_type = (note.get("note_type") or note_detail.get("note_type") if isinstance(note_detail, dict) else None) or "other"
+    note_type = note.get("note_type") or (note_detail.get("note_type") if isinstance(note_detail, dict) else None) or "other"
     tags = extract_tags(note, note_detail)
     original_content = extract_original_content(note, note_detail)
     ai_content = extract_ai_note_content(note, note_detail)
