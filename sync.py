@@ -1147,6 +1147,27 @@ def fetch_notion_synced_note_timestamps():
     return note_timestamps
 
 
+def ensure_database_properties():
+    """确保 Notion 数据库包含所有必要的属性字段，缺失时自动创建。"""
+    required = {
+        "笔记更新时间": {"date": {}},
+    }
+    db = notion_request(f"/databases/{NOTION_DB_ID}", method="GET")
+    if not db:
+        print("[WARN] 无法读取 Notion 数据库结构，跳过属性初始化")
+        return
+    existing = set(db.get("properties", {}).keys())
+    missing = {k: v for k, v in required.items() if k not in existing}
+    if not missing:
+        return
+    print(f"[INFO] 自动创建缺失的数据库属性: {list(missing.keys())}")
+    res = notion_request(f"/databases/{NOTION_DB_ID}", {"properties": missing}, method="PATCH")
+    if res:
+        print("[INFO] 数据库属性创建成功 ✓")
+    else:
+        print("[WARN] 数据库属性创建失败，「笔记更新时间」将无法写入")
+
+
 def list_block_children(block_id):
     result = notion_request(f"/blocks/{block_id}/children?page_size=100", method="GET")
     if not result:
@@ -1262,6 +1283,9 @@ def main():
     if not NOTION_DB_ID:
         print("[ERROR] NOTION_DB_ID 未配置")
         sys.exit(1)
+
+    # 确保数据库 schema 包含所有必要属性（如「笔记更新时间」）
+    ensure_database_properties()
 
     synced_ids = set()
 
