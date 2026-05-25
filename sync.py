@@ -655,10 +655,15 @@ def extract_append_sections(note_detail):
         "append_notes",
         "appends",
         "append_note_list",
+        "note_appends",
+        "appended_notes",
+        "append_list",
         "supplements",
         "follow_ups",
         "updates",
         "child_notes",
+        "children",
+        "comments",
     }
     title_keys = ("title", "name", "label")
     content_keys = (
@@ -1024,6 +1029,7 @@ def build_notion_payload(note, note_detail):
     """构建 Notion 页面属性与内容。"""
     note_id = get_note_id(note)
     created_at = get_note_created_at(note)
+    updated_at = get_note_updated_at(note, note_detail if isinstance(note_detail, dict) else None)
     title = (note.get("title") or "").strip()
 
     knowledge_base = extract_knowledge_base(note, note_detail)
@@ -1056,6 +1062,12 @@ def build_notion_payload(note, note_detail):
         created_dt = parse_iso_datetime(created_at)
         if created_dt:
             properties["创建时间"] = {"date": {"start": created_dt.strftime("%Y-%m-%d")}}
+
+    if updated_at:
+        updated_dt = parse_iso_datetime(updated_at)
+        if updated_dt:
+            # 存储 Get 笔记侧的最后更新时间，用于下次运行时检测追加笔记等变更
+            properties["笔记更新时间"] = {"date": {"start": updated_dt.isoformat()}}
 
     if tags:
         properties["标签"] = {"multi_select": [{"name": tag} for tag in tags]}
@@ -1094,6 +1106,45 @@ def query_notion_page_by_note_id(note_id):
         return None
     pages = result.get("results") or []
     return pages[0] if pages else None
+
+
+def fetch_notion_synced_note_timestamps():
+    """分页查询 Notion 数据库，返回所有已同步笔记的 {note_id: updated_at_str} 映射。
+
+    用于追加笔记检测：将 Notion 侧存储的「笔记更新时间」与 Get笔记当前的
+    updated_at 对比，若后者更新则触发重同步。
+    """
+    note_timestamps = {}
+    start_cursor = None
+
+    while True:
+        body = {"page_size": 100}
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+
+        result = notion_request(f"/databases/{NOTION_DB_ID}/query", body)
+        if not result:
+            break
+
+        for page in result.get("results") or []:
+            props = page.get("properties") or {}
+
+            # 取笔记 ID
+            note_id_rt = (props.get("笔记 ID") or {}).get("rich_text") or []
+            note_id = note_id_rt[0].get("plain_text", "") if note_id_rt else ""
+            if not note_id:
+                continue
+
+            # 取已存储的 Get笔记侧 updated_at
+            date_val = ((props.get("笔记更新时间") or {}).get("date") or {}).get("start", "")
+            if date_val:
+                note_timestamps[note_id] = date_val
+
+        if not result.get("has_more"):
+            break
+        start_cursor = result.get("next_cursor")
+
+    return note_timestamps
 
 
 def list_block_children(block_id):
@@ -1220,6 +1271,7 @@ def main():
         print("[INFO] 没有获取到笔记，跳过")
         return
 
+    # ── 第一轮：最近 CHECK_HOURS 内 updated_at 有变化的笔记 ──────────────
     recent_notes = filter_notes_by_time(all_notes, CHECK_HOURS)
     print(f"[INFO] 最近 {CHECK_HOURS} 小时内有更新的笔记: {len(recent_notes)} 条")
 
@@ -1232,7 +1284,37 @@ def main():
         seen_note_ids.add(note_id)
         candidate_notes.append(note)
 
-    print(f"[INFO] 需要处理的笔记: {len(candidate_notes)} 条")
+    # ── 第二轮：追加笔记检测 ─────────────────────────────────────────────
+    # 查询 Notion 里已存储的「笔记更新时间」，与 Get笔记当前 updated_at 对比。
+    # 若 Get笔记侧更新（比如新增了追加笔记），则把该笔记也加入同步候选。
+    # 注：仅对「第一轮未覆盖」且「已在 Notion 中」的笔记做比较，避免重复同步。
+    print("[INFO] 检查已同步笔记是否有新追加内容（追加笔记检测）...")
+    notion_timestamps = fetch_notion_synced_note_timestamps()
+    append_catch_count = 0
+
+    # 建立 note_id -> note 映射，方便快速查找
+    note_map = {get_note_id(n): n for n in all_notes}
+
+    for note_id, stored_updated_str in notion_timestamps.items():
+        if note_id in seen_note_ids:
+            continue  # 第一轮已处理
+        note = note_map.get(note_id)
+        if not note:
+            continue  # Get笔记侧已不存在该笔记（可能已删除）
+
+        current_updated_str = get_note_updated_at(note)
+        current_dt = parse_iso_datetime(current_updated_str)
+        stored_dt = parse_iso_datetime(stored_updated_str)
+
+        if current_dt and stored_dt and current_dt > stored_dt:
+            seen_note_ids.add(note_id)
+            candidate_notes.append(note)
+            append_catch_count += 1
+
+    if append_catch_count:
+        print(f"[INFO] 追加笔记检测额外发现需更新的笔记: {append_catch_count} 条")
+
+    print(f"[INFO] 本轮共需处理的笔记: {len(candidate_notes)} 条")
 
     if not candidate_notes:
         print("✨ 没有新的笔记需要同步")
