@@ -117,7 +117,7 @@ def notion_request(path, body=None, method="POST"):
 
 
 def fetch_getnote_notes():
-    """从 Get 笔记拉取笔记列表。"""
+    """从 Get 笔记拉取笔记列表（过滤子笔记/追加笔记本身）。"""
     all_notes = []
     since_id = 0
     max_iterations = 20
@@ -132,19 +132,25 @@ def fetch_getnote_notes():
             print(f"[ERROR] 获取笔记列表失败: {error_msg}")
             break
 
-        notes = result.get("data", {}).get("notes", [])
+        data = result.get("data") or {}
+        notes = data.get("notes", [])
         if not notes:
             break
 
-        all_notes.extend(notes)
-        next_since_id = notes[-1].get("id", 0)
-        if next_since_id == since_id:
+        # 过滤追加笔记本身（is_child_note=True），只保留独立笔记
+        parent_notes = [n for n in notes if not n.get("is_child_note")]
+        all_notes.extend(parent_notes)
+
+        # 优先使用 API 返回的 cursor，回退到最后一条笔记 ID
+        next_since_id = data.get("cursor") or notes[-1].get("id", 0)
+        if str(next_since_id) == str(since_id):
             break
 
         since_id = next_since_id
         iteration += 1
 
-        if len(notes) < 20:
+        has_more = data.get("has_more", len(notes) >= 20)
+        if not has_more:
             break
 
     print(f"[INFO] 共获取 {len(all_notes)} 条笔记")
@@ -649,100 +655,34 @@ def extract_ai_note_content(note, note_detail):
 
 
 def extract_append_sections(note_detail):
-    """递归寻找追加笔记/补充内容。"""
-    append_sections = []
-    candidate_keys = {
-        "append_notes",
-        "appends",
-        "append_note_list",
-        "note_appends",
-        "appended_notes",
-        "append_list",
-        "supplements",
-        "follow_ups",
-        "updates",
-        "child_notes",
-        "children",
-        "comments",
-    }
-    title_keys = ("title", "name", "label")
-    content_keys = (
-        "content",
-        "text",
-        "summary",
-        "excerpt",
-        "original_content",
-        "raw_content",
-    )
+    """拉取追加笔记内容。
 
-    def walk(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if key in candidate_keys and item:
-                    append_sections.extend(normalize_append_items(item))
-                else:
-                    walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
+    Get 笔记 API 的追加笔记（追加笔记）以独立 note 形式存储，父笔记通过
+    children_ids 字段记录子笔记 ID，子笔记的 is_child_note=True。
+    需要对每个 child_id 单独调用 fetch_note_detail 获取正文。
+    """
+    if not isinstance(note_detail, dict):
+        return []
 
-    def normalize_append_items(items):
-        normalized = []
-        if isinstance(items, dict):
-            items = [items]
-        if not isinstance(items, list):
-            return normalized
+    children_ids = note_detail.get("children_ids") or []
+    if not children_ids:
+        return []
 
-        for index, item in enumerate(items, 1):
-            if isinstance(item, str):
-                text = item.strip()
-                if text:
-                    normalized.append((f"追加笔记 {index}", text))
-                continue
-
-            if not isinstance(item, dict):
-                text = normalize_text(item)
-                if text:
-                    normalized.append((f"追加笔记 {index}", text))
-                continue
-
-            title = ""
-            for key in title_keys:
-                title = normalize_text(item.get(key))
-                if title:
-                    break
-            if not title:
-                created_at = normalize_text(item.get("created_at") or item.get("updated_at"))
-                title = f"追加笔记 {index}"
-                if created_at:
-                    title = f"{title} ({created_at})"
-
-            content = ""
-            for key in content_keys:
-                content = normalize_text(item.get(key))
-                if content:
-                    break
-
-            if not content:
-                content = normalize_text(item)
-
-            if content:
-                normalized.append((title, content))
-
-        return normalized
-
-    walk(note_detail)
-
-    deduped = []
-    seen = set()
-    for title, content in append_sections:
-        signature = f"{title}\n{content}"
-        if signature in seen:
+    sections = []
+    for index, child_id in enumerate(children_ids, 1):
+        child = fetch_note_detail(str(child_id))
+        if not child:
             continue
-        seen.add(signature)
-        deduped.append((title, content))
+        content = (child.get("content") or "").strip()
+        if not content:
+            continue
+        created_at = (child.get("created_at") or "").strip()
+        title = f"追加笔记 {index}"
+        if created_at:
+            title = f"{title} · {created_at}"
+        sections.append((title, content))
 
-    return deduped
+    return sections
 
 
 def chunk_text(text, limit=1800):
@@ -1066,8 +1006,12 @@ def build_notion_payload(note, note_detail):
     if updated_at:
         updated_dt = parse_iso_datetime(updated_at)
         if updated_dt:
-            # 存储 Get 笔记侧的最后更新时间，用于下次运行时检测追加笔记等变更
+            # 存储 Get 笔记侧的最后更新时间，用于下次运行时检测内容变更
             properties["笔记更新时间"] = {"date": {"start": updated_dt.isoformat()}}
+
+    # 存储追加笔记数量，父笔记 updated_at 不随追加笔记变化，需靠此字段检测新增
+    children_count = note_detail.get("children_count", 0) if isinstance(note_detail, dict) else 0
+    properties["追加笔记数"] = {"number": int(children_count)}
 
     if tags:
         properties["标签"] = {"multi_select": [{"name": tag} for tag in tags]}
@@ -1108,13 +1052,16 @@ def query_notion_page_by_note_id(note_id):
     return pages[0] if pages else None
 
 
-def fetch_notion_synced_note_timestamps():
-    """分页查询 Notion 数据库，返回所有已同步笔记的 {note_id: updated_at_str} 映射。
+def fetch_notion_synced_note_state():
+    """分页查询 Notion 数据库，返回所有已同步笔记的状态快照。
 
-    用于追加笔记检测：将 Notion 侧存储的「笔记更新时间」与 Get笔记当前的
-    updated_at 对比，若后者更新则触发重同步。
+    返回格式: {note_id: {"updated_at": str, "children_count": int}}
+
+    用于追加笔记检测：
+    - updated_at 变化 → 内容有更新
+    - children_count 增加 → 新增了追加笔记（父笔记 updated_at 不变，只能靠此字段）
     """
-    note_timestamps = {}
+    note_state = {}
     start_cursor = None
 
     while True:
@@ -1135,22 +1082,31 @@ def fetch_notion_synced_note_timestamps():
             if not note_id:
                 continue
 
-            # 取已存储的 Get笔记侧 updated_at
-            date_val = ((props.get("笔记更新时间") or {}).get("date") or {}).get("start", "")
-            if date_val:
-                note_timestamps[note_id] = date_val
+            # 取已存储的 updated_at
+            updated_at = ((props.get("笔记更新时间") or {}).get("date") or {}).get("start", "")
+
+            # 取已存储的 children_count（追加笔记数）
+            children_count = (props.get("追加笔记数") or {}).get("number")
+            if children_count is None:
+                children_count = -1  # -1 表示尚未记录，任何真实值都会触发更新
+
+            note_state[note_id] = {
+                "updated_at": updated_at,
+                "children_count": int(children_count),
+            }
 
         if not result.get("has_more"):
             break
         start_cursor = result.get("next_cursor")
 
-    return note_timestamps
+    return note_state
 
 
 def ensure_database_properties():
     """确保 Notion 数据库包含所有必要的属性字段，缺失时自动创建。"""
     required = {
         "笔记更新时间": {"date": {}},
+        "追加笔记数": {"number": {}},
     }
     db = notion_request(f"/databases/{NOTION_DB_ID}", method="GET")
     if not db:
@@ -1309,28 +1265,42 @@ def main():
         candidate_notes.append(note)
 
     # ── 第二轮：追加笔记检测 ─────────────────────────────────────────────
-    # 查询 Notion 里已存储的「笔记更新时间」，与 Get笔记当前 updated_at 对比。
-    # 若 Get笔记侧更新（比如新增了追加笔记），则把该笔记也加入同步候选。
-    # 注：仅对「第一轮未覆盖」且「已在 Notion 中」的笔记做比较，避免重复同步。
+    # Get笔记 API 的追加笔记（children）不会更新父笔记的 updated_at，
+    # 因此必须同时比较两个维度：
+    #   1. updated_at 变化 → 内容有更新
+    #   2. children_count 增加 → 新增了追加笔记
+    # 仅对「第一轮未覆盖」且「已在 Notion 中」的笔记做检测。
     print("[INFO] 检查已同步笔记是否有新追加内容（追加笔记检测）...")
-    notion_timestamps = fetch_notion_synced_note_timestamps()
+    notion_state = fetch_notion_synced_note_state()
     append_catch_count = 0
 
     # 建立 note_id -> note 映射，方便快速查找
     note_map = {get_note_id(n): n for n in all_notes}
 
-    for note_id, stored_updated_str in notion_timestamps.items():
+    for note_id, stored in notion_state.items():
         if note_id in seen_note_ids:
             continue  # 第一轮已处理
         note = note_map.get(note_id)
         if not note:
-            continue  # Get笔记侧已不存在该笔记（可能已删除）
+            continue  # Get笔记侧已不存在该笔记
 
+        needs_update = False
+
+        # 检测 1：updated_at 是否变化
         current_updated_str = get_note_updated_at(note)
         current_dt = parse_iso_datetime(current_updated_str)
-        stored_dt = parse_iso_datetime(stored_updated_str)
-
+        stored_dt = parse_iso_datetime(stored.get("updated_at", ""))
         if current_dt and stored_dt and current_dt > stored_dt:
+            needs_update = True
+
+        # 检测 2：追加笔记数是否增加（父笔记 updated_at 不变，靠此字段兜底）
+        if not needs_update:
+            current_children = int(note.get("children_count", 0))
+            stored_children = int(stored.get("children_count", -1))
+            if stored_children >= 0 and current_children > stored_children:
+                needs_update = True
+
+        if needs_update:
             seen_note_ids.add(note_id)
             candidate_notes.append(note)
             append_catch_count += 1
