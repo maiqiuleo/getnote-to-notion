@@ -1093,6 +1093,7 @@ def fetch_notion_synced_note_state():
             note_state[note_id] = {
                 "updated_at": updated_at,
                 "children_count": int(children_count),
+                "page_id": page.get("id", ""),
             }
 
         if not result.get("has_more"):
@@ -1324,11 +1325,35 @@ def main():
         if success:
             success_count += 1
 
+    # ── 第三轮：同步删除 ─────────────────────────────────────────────────
+    # 在 Notion 中存在、但 Get笔记已删除的笔记 → 放入垃圾桶（归档）
+    # 只对有「笔记 ID」属性的页面生效，手动创建的 Notion 页面不受影响。
+    print("\n[INFO] 检查是否有笔记已从 Get笔记删除...")
+    getnote_ids = {get_note_id(n) for n in all_notes}
+    deleted_count = 0
+
+    for note_id, state in notion_state.items():
+        if note_id in getnote_ids:
+            continue  # Get笔记里还存在，不处理
+        page_id = state.get("page_id", "")
+        if not page_id:
+            continue
+        print(f"   🗑️ Get笔记已删除，同步放入垃圾桶: {note_id[:16]}...")
+        if archive_notion_page(page_id):
+            deleted_count += 1
+        else:
+            print(f"   ❌ 归档失败: {note_id[:16]}")
+
+    if deleted_count:
+        print(f"[INFO] 共同步删除 {deleted_count} 条笔记")
+
     print("\n" + "=" * 60)
     print("🎉 同步完成!")
-    print(f"   本次尝试: {len(candidate_notes)} 条")
-    print(f"   同步成功: {success_count} 条")
-    print(f"   同步失败: {len(candidate_notes) - success_count} 条")
+    print(f"   新增/更新: {success_count} 条")
+    if len(candidate_notes) - success_count:
+        print(f"   同步失败: {len(candidate_notes) - success_count} 条")
+    if deleted_count:
+        print(f"   同步删除: {deleted_count} 条")
     print("=" * 60)
 
     if success_count < len(candidate_notes):
